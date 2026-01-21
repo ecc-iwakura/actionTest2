@@ -1,0 +1,47 @@
+# This is a basic workflow to help you get started with Actions
+
+name: CI
+
+# Controls when the workflow will run
+on:
+  # Triggers the workflow on push or pull request events but only for the "main" branch
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build"
+  build:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-latest
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v4
+
+      # Runs a single command using the runners shell
+      - name: Run a one-line script
+        run: echo Hello, world!
+
+      # Teamsチャットテスト
+      - name: Notify Teams
+        if: always()
+        shell: pwsh
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $status = "${{ job.status }}"
+          $runUrl = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          $text = "GitHub Actions build **$status**`n`nRepo: ${{ github.repository }}`nBranch: ${{ github.ref_name }}`nCommit: ${{ github.sha }}`nArtifact: build-package ($env:PACKAGE_NAME)`nRun: $runUrl"
+          # Incoming Webhook はカード形式(JSON)を受け取る
+          $payload = @{
+            text = $text
+          } | ConvertTo-Json -Depth 5
+          Invoke-RestMethod -Method Post -Uri $env:TEAMS_WEBHOOK_URL -ContentType "application/json" -Body $payload
