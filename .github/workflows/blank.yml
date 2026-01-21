@@ -1,35 +1,50 @@
-# This is a basic workflow to help you get started with Actions
+name: C/C++ CI (MSBuild + Teams Notify)
 
-name: CI
-
-# Controls when the workflow will run
-on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
+"on":
   push:
-    branches: [ "main" ]
+    branches: ["master"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["master"]
 
-  # Allows you to run this workflow manually from the Actions tab
-  workflow_dispatch:
-
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  # This workflow contains a single job called "build"
   build:
-    # The type of runner that the job will run on
-    runs-on: ubuntu-latest
+    runs-on: windows-2022
+    env:
+      SOLUTION_FILE: 3DSound.sln
+      CONFIGURATION: Release
+      PLATFORM: x64
 
-    # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v5
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
 
-      # Teamsチャットテスト
+      - name: Setup NuGet.exe
+        uses: NuGet/setup-nuget@v2
+
+      - name: Restore NuGet packages
+        shell: pwsh
+        run: |
+          nuget restore $env:SOLUTION_FILE
+
+      # 成功/失敗どちらでも msbuild.log にログを残す
+      - name: Build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          msbuild $env:SOLUTION_FILE /m /t:Build /p:Configuration=$env:CONFIGURATION /p:Platform=$env:PLATFORM 2>&1 |
+            Tee-Object -FilePath msbuild.log
+
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 0) {
+            Write-Host "MSBuild failed with exit code $exitCode"
+            exit $exitCode
+          }
+
+      # 成功/失敗で text の中身を切り替えて Webhook に送る（Power Automate 側は triggerBody()?['text'] を投稿）
       - name: Notify Teams
         if: always()
         shell: pwsh
@@ -37,11 +52,38 @@ jobs:
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
         run: |
           $ErrorActionPreference = "Stop"
-          $status = "${{ job.status }}"
+
+          $status = "${{ job.status }}"   # success / failure / cancelled
           $runUrl = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          $text = "GitHub Actions build **$status**`n`nRepo: ${{ github.repository }}`nBranch: ${{ github.ref_name }}`nCommit: ${{ github.sha }}`nArtifact: build-package ($env:PACKAGE_NAME)`nRun: $runUrl"
-          # Incoming Webhook はカード形式(JSON)を受け取る
-          $payload = @{
-            text = $text
-          } | ConvertTo-Json -Depth 5
+
+          if ($status -eq "success") {
+            $text = "GitHub Actions build **$status**`n`nRepo: ${{ github.repository }}`nBranch: ${{ github.ref_name }}`nCommit: ${{ github.sha }}`nRun: $runUrl"
+          }
+          elseif ($status -eq "failure") {
+            $err = ""
+
+            if (Test-Path "msbuild.log") {
+              # MSBuild のエラー行を抽出（必要ならパターン調整）
+              $lines = Select-String -Path "msbuild.log" -Pattern ": error " |
+                Select-Object -ExpandProperty Line
+
+              if (-not $lines) {
+                # エラー行が拾えない場合は末尾を送る
+                $lines = Get-Content "msbuild.log" -Tail 80
+              }
+
+              # Teams に貼るので長すぎないように制限
+              $err = ($lines | Select-Object -First 40) -join "`n"
+            }
+            else {
+              $err = "(msbuild.log not found)"
+            }
+
+            $text = "GitHub Actions build **$status**`n`n$err`n`nRun: $runUrl"
+          }
+          else {
+            $text = "GitHub Actions build **$status**`n`nRepo: ${{ github.repository }}`nBranch: ${{ github.ref_name }}`nCommit: ${{ github.sha }}`nRun: $runUrl"
+          }
+
+          $payload = @{ text = $text } | ConvertTo-Json -Depth 5
           Invoke-RestMethod -Method Post -Uri $env:TEAMS_WEBHOOK_URL -ContentType "application/json" -Body $payload
